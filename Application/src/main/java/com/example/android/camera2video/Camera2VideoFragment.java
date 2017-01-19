@@ -26,7 +26,9 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.pm.PackageManager;
 import android.content.res.Configuration;
+import android.graphics.ImageFormat;
 import android.graphics.Matrix;
+import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.hardware.camera2.CameraAccessException;
@@ -37,10 +39,14 @@ import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CameraMetadata;
 import android.hardware.camera2.CaptureRequest;
 import android.hardware.camera2.params.StreamConfigurationMap;
+import android.media.Image;
+import android.media.ImageReader;
 import android.media.MediaRecorder;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.renderscript.Allocation;
 import android.support.annotation.NonNull;
 import android.support.v13.app.FragmentCompat;
 import android.support.v4.app.ActivityCompat;
@@ -55,7 +61,13 @@ import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.Toast;
 
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -79,6 +91,7 @@ public class Camera2VideoFragment extends Fragment
     private static final String[] VIDEO_PERMISSIONS = {
             Manifest.permission.CAMERA,
             Manifest.permission.RECORD_AUDIO,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE,
     };
 
     static {
@@ -95,6 +108,18 @@ public class Camera2VideoFragment extends Fragment
         INVERSE_ORIENTATIONS.append(Surface.ROTATION_270, 0);
     }
 
+    static int SHADING = 0;
+    static int[] SHADING_MODES = {CaptureRequest.SHADING_MODE_OFF,
+            CaptureRequest.SHADING_MODE_HIGH_QUALITY, CaptureRequest.SHADING_MODE_HIGH_QUALITY};
+
+    static int HOTPIX = 0;
+    static int[] HOTPIX_MODES = {CaptureRequest.HOT_PIXEL_MODE_OFF,
+            CaptureRequest.HOT_PIXEL_MODE_FAST, CaptureRequest.HOT_PIXEL_MODE_HIGH_QUALITY};
+
+    static int NOISERED = 2;
+    static int[] NOISE_MODES = {CaptureRequest.NOISE_REDUCTION_MODE_OFF,
+    CaptureRequest.NOISE_REDUCTION_MODE_FAST, CaptureRequest.NOISE_REDUCTION_MODE_HIGH_QUALITY,
+    CaptureRequest.NOISE_REDUCTION_MODE_MINIMAL, CaptureRequest.NOISE_REDUCTION_MODE_ZERO_SHUTTER_LAG};
     /**
      * An {@link AutoFitTextureView} for camera preview.
      */
@@ -436,8 +461,16 @@ public class Camera2VideoFragment extends Fragment
                     .get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
             mSensorOrientation = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION);
             mVideoSize = chooseVideoSize(map.getOutputSizes(MediaRecorder.class));
+            for (Size sz : map.getOutputSizes(MediaRecorder.class)) {
+                Log.i("openCamera", "supported size: " + sz);
+            }
+            Log.i("openCamera", "selected size: " + mVideoSize);
             mPreviewSize = chooseOptimalSize(map.getOutputSizes(SurfaceTexture.class),
                     width, height, mVideoSize);
+
+            for (int f : map.getOutputFormats()) {
+                Log.i("foo", "supported format: " + f);
+            }
 
             int orientation = getResources().getConfiguration().orientation;
             if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
@@ -483,6 +516,46 @@ public class Camera2VideoFragment extends Fragment
     /**
      * Start the camera preview.
      */
+
+    ImageReader mImageReader;
+
+    private final ImageReader.OnImageAvailableListener mOnImageAvailableListener  = new ImageReader.OnImageAvailableListener() {
+
+        @Override
+        public void onImageAvailable(ImageReader reader) {
+            /********
+             * hack
+             * IMAGES SHOW UP HERE
+             ********/
+            Image img = reader.acquireNextImage();
+            Log.i("onImageAvailable", "got image w/ timestamp: " + img.getTimestamp());
+            Log.i("onImageAvailable", "image format is " + img.getFormat());
+            ByteBuffer buf = img.getPlanes()[0].getBuffer();
+
+            File path = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DCIM),
+                    "c2vid");
+
+            path.mkdirs();
+            String prefix = "";
+            prefix += "ls" + SHADING + "_";
+            prefix += "hc" + HOTPIX + "_";
+            prefix += "nr"+NOISERED+"_";
+            File outfile = new File(path, prefix + img.getTimestamp() + ".bmp");
+            try {
+                FileChannel fc = new FileOutputStream(outfile).getChannel();
+
+                fc.write(buf);
+                fc.close();
+            } catch (FileNotFoundException ex) {
+                Log.e("onImageAvailable", "file not found exception");
+            } catch (IOException ex) {
+                Log.e("onImageAvailable", "IO exception");
+            }
+            img.close();
+        }
+
+    };
+
     private void startPreview() {
         if (null == mCameraDevice || !mTextureView.isAvailable() || null == mPreviewSize) {
             return;
@@ -492,12 +565,27 @@ public class Camera2VideoFragment extends Fragment
             SurfaceTexture texture = mTextureView.getSurfaceTexture();
             assert texture != null;
             texture.setDefaultBufferSize(mPreviewSize.getWidth(), mPreviewSize.getHeight());
-            mPreviewBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW);
+            mPreviewBuilder = mCameraDevice.createCaptureRequest(CameraDevice.TEMPLATE_MANUAL);
+
+            /*********
+             * hack
+             * SET CAMERA PROPERTIES HERE
+             *********/
+            mPreviewBuilder.set(CaptureRequest.SHADING_MODE, SHADING_MODES[SHADING]);
+            mPreviewBuilder.set(CaptureRequest.HOT_PIXEL_MODE, HOTPIX_MODES[HOTPIX]);
+            mPreviewBuilder.set(CaptureRequest.NOISE_REDUCTION_MODE, NOISE_MODES[NOISERED]);
 
             Surface previewSurface = new Surface(texture);
             mPreviewBuilder.addTarget(previewSurface);
 
-            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface), new CameraCaptureSession.StateCallback() {
+            Log.i("startPreview", "setting resolution: " + mPreviewSize);
+            mImageReader = ImageReader.newInstance(mVideoSize.getWidth(), mVideoSize.getHeight(), ImageFormat.YUV_420_888, 2);
+
+            mImageReader.setOnImageAvailableListener(mOnImageAvailableListener, mBackgroundHandler);
+
+            mPreviewBuilder.addTarget(mImageReader.getSurface());
+
+            mCameraDevice.createCaptureSession(Arrays.asList(previewSurface, mImageReader.getSurface()), new CameraCaptureSession.StateCallback() {
 
                 @Override
                 public void onConfigured(CameraCaptureSession cameraCaptureSession) {
