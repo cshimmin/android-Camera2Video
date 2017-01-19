@@ -108,6 +108,11 @@ public class Camera2VideoFragment extends Fragment
         INVERSE_ORIENTATIONS.append(Surface.ROTATION_270, 0);
     }
 
+
+    /******
+     * hack
+     * These variables control some settings for the camera at startup.
+     ******/
     static int SHADING = 0;
     static int[] SHADING_MODES = {CaptureRequest.SHADING_MODE_OFF,
             CaptureRequest.SHADING_MODE_HIGH_QUALITY, CaptureRequest.SHADING_MODE_HIGH_QUALITY};
